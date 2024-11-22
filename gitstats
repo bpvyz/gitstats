@@ -15,7 +15,7 @@ import time
 import zlib
 
 if sys.version_info < (2, 6):
-	print >> sys.stderr, "Python 2.6 or higher is required for gitstats"
+	print (sys.stderr, "Python 2.6 or higher is required for gitstats")
 	sys.exit(1)
 
 from multiprocessing import Pool
@@ -23,7 +23,7 @@ from multiprocessing import Pool
 os.environ['LC_ALL'] = 'C'
 
 GNUPLOT_COMMON = 'set terminal png transparent size 640,240\nset size 1.0,1.0\n'
-ON_LINUX = (platform.system() == 'Linux')
+ON_LINUX = sys.platform != "win32"
 WEEKDAYS = ('Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun')
 
 exectime_internal = 0.0
@@ -50,27 +50,43 @@ conf = {
 	'start_date': ''
 }
 
-def getpipeoutput(cmds, quiet = False):
-	global exectime_external
-	start = time.time()
-	if not quiet and ON_LINUX and os.isatty(1):
-		print '>> ' + ' | '.join(cmds),
-		sys.stdout.flush()
-	p = subprocess.Popen(cmds[0], stdout = subprocess.PIPE, shell = True)
-	processes=[p]
-	for x in cmds[1:]:
-		p = subprocess.Popen(x, stdin = p.stdout, stdout = subprocess.PIPE, shell = True)
-		processes.append(p)
-	output = p.communicate()[0]
-	for p in processes:
-		p.wait()
-	end = time.time()
-	if not quiet:
-		if ON_LINUX and os.isatty(1):
-			print '\r',
-		print '[%.5f] >> %s' % (end - start, ' | '.join(cmds))
-	exectime_external += (end - start)
-	return output.rstrip('\n')
+def getpipeoutput(cmds, quiet=False):
+    global exectime_external
+    start = time.time()
+    if not quiet and ON_LINUX and os.isatty(1):
+        print('>> ' + ' | '.join(cmds), end='', flush=True)
+
+    # Izvršavanje komande
+    processes = []
+    p = subprocess.Popen(cmds[0], stdout=subprocess.PIPE, shell=True, text=True, encoding='utf-8', errors='replace')
+    processes.append(p)
+
+    # Provera da li je Windows i zamena za wc -l
+    if not ON_LINUX and len(cmds) > 1 and 'wc -l' in cmds:
+        # Prilagođavanje za Windows platformu
+        output, _ = p.communicate()
+        line_count = len(output.strip().splitlines())  # Broj linija
+        output = str(line_count)  # Pretvori u string za kompatibilnost
+    else:
+        # Nastavi sa narednim komandama
+        for x in cmds[1:]:
+            p = subprocess.Popen(x, stdin=p.stdout, stdout=subprocess.PIPE, shell=True, text=True)
+            processes.append(p)
+        output = p.communicate()[0]
+
+    # Čekanje svih procesa
+    for p in processes:
+        p.wait()
+
+    end = time.time()
+    if not quiet:
+        if ON_LINUX and os.isatty(1):
+            print('\r', end='')
+        print('[%.5f] >> %s' % (end - start, ' | '.join(cmds)))
+
+    exectime_external += (end - start)
+    return output.rstrip('\n') if output else ''
+
 
 def getlogrange(defaultrange = 'HEAD', end_only = True):
 	commit_range = getcommitrange(defaultrange, end_only)
@@ -104,21 +120,6 @@ def getstatsummarycounts(line):
 		numbers.insert(1, 0); # only deletions were printed on line
 	return numbers
 
-VERSION = 0
-def getversion():
-	global VERSION
-	if VERSION == 0:
-		gitstats_repo = os.path.dirname(os.path.abspath(__file__))
-		VERSION = getpipeoutput(["git --git-dir=%s/.git --work-tree=%s rev-parse --short %s" %
-			(gitstats_repo, gitstats_repo, getcommitrange('HEAD').split('\n')[0])])
-	return VERSION
-
-def getgitversion():
-	return getpipeoutput(['git --version']).split('\n')[0]
-
-def getgnuplotversion():
-	return getpipeoutput(['%s --version' % gnuplot_cmd]).split('\n')[0]
-
 def getnumoffilesfromrev(time_rev):
 	"""
 	Get number of files changed in commit
@@ -126,12 +127,17 @@ def getnumoffilesfromrev(time_rev):
 	time, rev = time_rev
 	return (int(time), rev, int(getpipeoutput(['git ls-tree -r --name-only "%s"' % rev, 'wc -l']).split('\n')[0]))
 
-def getnumoflinesinblob(ext_blob):
-	"""
-	Get number of lines in blob
-	"""
-	ext, blob_id = ext_blob
-	return (ext, blob_id, int(getpipeoutput(['git cat-file blob %s' % blob_id, 'wc -l']).split()[0]))
+def getnumoflinesinblob(blob):
+	try:
+		ext, blob_id = blob  # Pretpostavljamo da blob bude tuple (ext, blob_id)
+		cmd = f'git cat-file blob {blob_id}'
+		output = getpipeoutput([cmd])  # Dobij sirov izlaz
+		line_count = output.count('\n')  # Prebroj linije
+		return (ext, blob_id, line_count)
+	except Exception as e:
+		print(f"Error processing blob {blob}: {e}")
+		return (None, None, 0)  # Vraća podrazumevane vrednosti u slučaju greške
+
 
 class DataCollector:
 	"""Manages data collection from a revision control repository."""
@@ -207,7 +213,7 @@ class DataCollector:
 	def loadCache(self, cachefile):
 		if not os.path.exists(cachefile):
 			return
-		print 'Loading cache...'
+		print ('Loading cache...')
 		f = open(cachefile, 'rb')
 		try:
 			self.cache = pickle.loads(zlib.decompress(f.read()))
@@ -269,7 +275,7 @@ class DataCollector:
 	##
 	# Save cacheable data
 	def saveCache(self, cachefile):
-		print 'Saving cache...'
+		print ('Saving cache...')
 		tempfile = cachefile + '.tmp'
 		f = open(tempfile, 'wb')
 		#pickle.dump(self.cache, f)
@@ -286,7 +292,12 @@ class GitDataCollector(DataCollector):
 	def collect(self, dir):
 		DataCollector.collect(self, dir)
 
-		self.total_authors += int(getpipeoutput(['git shortlog -s %s' % getlogrange(), 'wc -l']))
+		# Računanje broja autora
+		shortlog_cmd = ['git shortlog -s %s' % getlogrange()]
+		output = getpipeoutput(shortlog_cmd)
+
+		# Brojanje linija u izlazu
+		self.total_authors += len(output.strip().splitlines())
 		#self.total_lines = int(getoutput('git-ls-files -z |xargs -0 cat |wc -l'))
 
 		# tags
@@ -310,7 +321,7 @@ class GitDataCollector(DataCollector):
 		# collect info on tags, starting from latest
 		tags_sorted_by_date_desc = map(lambda el : el[1], reversed(sorted(map(lambda el : (el[1]['date'], el[0]), self.tags.items()))))
 		prev = None
-		for tag in reversed(tags_sorted_by_date_desc):
+		for tag in reversed(list(tags_sorted_by_date_desc)):
 			cmd = 'git shortlog -s "%s"' % tag
 			if prev != None:
 				cmd += ' "^%s"' % prev
@@ -327,14 +338,21 @@ class GitDataCollector(DataCollector):
 
 		# Collect revision statistics
 		# Outputs "<stamp> <date> <time> <timezone> <author> '<' <mail> '>'"
-		lines = getpipeoutput(['git rev-list --pretty=format:"%%at %%ai %%aN <%%aE>" %s' % getlogrange('HEAD'), 'grep -v ^commit']).split('\n')
-		for line in lines:
-			parts = line.split(' ', 4)
-			author = ''
-			try:
-				stamp = int(parts[0])
-			except ValueError:
-				stamp = 0
+		cmd = 'git rev-list --pretty=format:"%at %ai %aN <%aE>" HEAD'
+		process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, text=True)
+		output, _ = process.communicate()
+
+		# Filtriranje redova (zamena za grep -v ^commit)
+		filtered_lines = [line for line in output.splitlines() if not line.startswith('commit')]
+
+		# Obrada filtriranih linija
+		for line in filtered_lines:
+			parts = line.split()
+			if len(parts) < 4:
+				print(f"Skipping line due to insufficient parts: {line}")
+			continue
+
+			# Obradi timezone iz parts[3] ili šta već treba
 			timezone = parts[3]
 			author, mail = parts[4].split('<', 1)
 			author = author.rstrip()
@@ -434,14 +452,23 @@ class GitDataCollector(DataCollector):
 			self.commits_by_timezone[timezone] = self.commits_by_timezone.get(timezone, 0) + 1
 
 		# outputs "<stamp> <files>" for each revision
-		revlines = getpipeoutput(['git rev-list --pretty=format:"%%at %%T" %s' % getlogrange('HEAD'), 'grep -v ^commit']).strip().split('\n')
-		lines = []
+		cmd = 'git rev-list --pretty=format:"%at %T" HEAD'
+		process = subprocess.Popen(cmd, stdout=subprocess.PIPE, shell=True, text=True)
+		output, _ = process.communicate()
 		revs_to_read = []
-		time_rev_count = []
+		# Filtriraj redove (zamena za grep -v ^commit)
+		filtered_lines = [line for line in output.splitlines() if not line.startswith('commit')]
 		#Look up rev in cache and take info from cache if found
 		#If not append rev to list of rev to read from repo
-		for revline in revlines:
-			time, rev = revline.split(' ')
+		for revline in filtered_lines:
+			# Provera da li revline ima dovoljno delova
+			parts = revline.split(' ', 1)  # Razdvoji samo na prvom razmaku
+			if len(parts) != 2:
+				print(f"Skipping invalid line: {revline}")
+				continue
+
+			# Unpack vrednosti
+			time, rev = parts
 			#if cache empty then add time and rev to list of new rev's
 			#otherwise try to read needed info from cache
 			if 'files_in_tree' not in self.cache.keys():
@@ -474,7 +501,7 @@ class GitDataCollector(DataCollector):
 			try:
 				self.files_by_stamp[int(stamp)] = int(files)
 			except ValueError:
-				print 'Warning: failed to parse line "%s"' % line
+				print ('Warning: failed to parse line "%s"' % line)
 
 		# extensions and size of files
 		lines = getpipeoutput(['git ls-tree -r -l -z %s' % getcommitrange('HEAD', end_only = True)]).split('\000')
@@ -563,9 +590,9 @@ class GitDataCollector(DataCollector):
 
 						files, inserted, deleted = 0, 0, 0
 					except ValueError:
-						print 'Warning: unexpected line "%s"' % line
+						print ('Warning: unexpected line "%s"' % line)
 				else:
-					print 'Warning: unexpected line "%s"' % line
+					print ('Warning: unexpected line "%s"' % line)
 			else:
 				numbers = getstatsummarycounts(line)
 
@@ -577,7 +604,7 @@ class GitDataCollector(DataCollector):
 					self.total_lines_removed += deleted
 
 				else:
-					print 'Warning: failed to handle line "%s"' % line
+					print ('Warning: failed to handle line "%s"' % line)
 					(files, inserted, deleted) = (0, 0, 0)
 				#self.changes_by_date[stamp] = { 'files': files, 'ins': inserted, 'del': deleted }
 		self.total_lines += total_lines
@@ -622,31 +649,34 @@ class GitDataCollector(DataCollector):
 						self.changes_by_date_by_author[stamp][author]['commits'] = self.authors[author]['commits']
 						files, inserted, deleted = 0, 0, 0
 					except ValueError:
-						print 'Warning: unexpected line "%s"' % line
+						print ('Warning: unexpected line "%s"' % line)
 				else:
-					print 'Warning: unexpected line "%s"' % line
+					print ('Warning: unexpected line "%s"' % line)
 			else:
 				numbers = getstatsummarycounts(line);
 
 				if len(numbers) == 3:
 					(files, inserted, deleted) = map(lambda el : int(el), numbers)
 				else:
-					print 'Warning: failed to handle line "%s"' % line
+					print ('Warning: failed to handle line "%s"' % line)
 					(files, inserted, deleted) = (0, 0, 0)
 	
 	def refine(self):
 		# authors
 		# name -> {place_by_commits, commits_frac, date_first, date_last, timedelta}
 		self.authors_by_commits = getkeyssortedbyvaluekey(self.authors, 'commits')
-		self.authors_by_commits.reverse() # most first
+		self.authors_by_commits = list(self.authors_by_commits)  # Konvertovanje map u listu
+		self.authors_by_commits.reverse()  # most first
 		for i, name in enumerate(self.authors_by_commits):
 			self.authors[name]['place_by_commits'] = i + 1
 
 		for name in self.authors.keys():
 			a = self.authors[name]
 			a['commits_frac'] = (100 * float(a['commits'])) / self.getTotalCommits()
-			date_first = datetime.datetime.fromtimestamp(a['first_commit_stamp'])
-			date_last = datetime.datetime.fromtimestamp(a['last_commit_stamp'])
+			date_first = datetime.datetime.fromtimestamp(a.get('first_commit_stamp', 0))  # 0 znači početni datum
+
+			date_last = datetime.datetime.fromtimestamp(a.get('last_commit_stamp', 0))  # 0 znači last datum
+
 			delta = date_last - date_first
 			a['date_first'] = date_first.strftime('%Y-%m-%d')
 			a['date_last'] = date_last.strftime('%Y-%m-%d')
@@ -667,7 +697,7 @@ class GitDataCollector(DataCollector):
 		return self.authors[author]
 	
 	def getAuthors(self, limit = None):
-		res = getkeyssortedbyvaluekey(self.authors, 'commits')
+		res = list(getkeyssortedbyvaluekey(self.authors, 'commits'))
 		res.reverse()
 		return res[:limit]
 	
@@ -744,7 +774,7 @@ class HTMLReportCreator(ReportCreator):
 					shutil.copyfile(src, path + '/' + file)
 					break
 			else:
-				print 'Warning: "%s" not found, so not copied (searched: %s)' % (file, basedirs)
+				print ('Warning: "%s" not found, so not copied (searched: %s)' % (file, basedirs))
 
 		f = open(path + "/index.html", 'w')
 		format = '%Y-%m-%d %H:%M:%S'
@@ -757,12 +787,28 @@ class HTMLReportCreator(ReportCreator):
 		f.write('<dl>')
 		f.write('<dt>Project name</dt><dd>%s</dd>' % (data.projectname))
 		f.write('<dt>Generated</dt><dd>%s (in %d seconds)</dd>' % (datetime.datetime.now().strftime(format), time.time() - data.getStampCreated()))
-		f.write('<dt>Generator</dt><dd><a href="http://gitstats.sourceforge.net/">GitStats</a> (version %s), %s, %s</dd>' % (getversion(), getgitversion(), getgnuplotversion()))
+		f.write('<dt>Generator</dt><dd><a href="http://gitstats.sourceforge.net/">GitStats</a>, %s, %s</dd>')
 		f.write('<dt>Report Period</dt><dd>%s to %s</dd>' % (data.getFirstCommitDate().strftime(format), data.getLastCommitDate().strftime(format)))
 		f.write('<dt>Age</dt><dd>%d days, %d active days (%3.2f%%)</dd>' % (data.getCommitDeltaDays(), len(data.getActiveDays()), (100.0 * len(data.getActiveDays()) / data.getCommitDeltaDays())))
 		f.write('<dt>Total Files</dt><dd>%s</dd>' % data.getTotalFiles())
 		f.write('<dt>Total Lines of Code</dt><dd>%s (%d added, %d removed)</dd>' % (data.getTotalLOC(), data.total_lines_added, data.total_lines_removed))
-		f.write('<dt>Total Commits</dt><dd>%s (average %.1f commits per active day, %.1f per all days)</dd>' % (data.getTotalCommits(), float(data.getTotalCommits()) / len(data.getActiveDays()), float(data.getTotalCommits()) / data.getCommitDeltaDays()))
+		total_commits = data.getTotalCommits()
+		active_days = len(data.getActiveDays())
+		commit_delta_days = data.getCommitDeltaDays()
+
+		# Proverite da li su delitelji nula pre nego što izvršite deljenje
+		if active_days == 0:
+			avg_active_day_commits = 0
+		else:
+			avg_active_day_commits = float(total_commits) / active_days
+
+		if commit_delta_days == 0:
+			avg_all_day_commits = 0
+		else:
+			avg_all_day_commits = float(total_commits) / commit_delta_days
+
+		# Zapisivanje u fajl
+		f.write('<dt>Total Commits</dt><dd>%s (average %.1f commits per active day, %.1f per all days)</dd>' % (total_commits, avg_active_day_commits, avg_all_day_commits))
 		f.write('<dt>Authors</dt><dd>%s (average %.1f commits per author)</dd>' % (data.getTotalAuthors(), (1.0 * data.getTotalCommits()) / data.getTotalAuthors()))
 		f.write('</dl>')
 
@@ -941,7 +987,15 @@ class HTMLReportCreator(ReportCreator):
 		f.write('<table><tr>')
 		f.write('<th>Timezone</th><th>Commits</th>')
 		f.write('</tr>')
-		max_commits_on_tz = max(data.commits_by_timezone.values())
+		
+		commits_by_timezone = data.commits_by_timezone
+
+		# Provera da li je rečnik prazan pre nego što pozovete max()
+		if commits_by_timezone:
+			max_commits_on_tz = max(commits_by_timezone.values())
+		else:
+			max_commits_on_tz = 0  # Ili neki drugi podrazumevani maksimum
+
 		for i in sorted(data.commits_by_timezone.keys(), key = lambda n : int(n)):
 			commits = data.commits_by_timezone[i]
 			r = 127 + int((float(commits) / max_commits_on_tz) * 128)
@@ -966,7 +1020,14 @@ class HTMLReportCreator(ReportCreator):
 		f.write('<tr><th>Author</th><th>Commits (%)</th><th>+ lines</th><th>- lines</th><th>First commit</th><th>Last commit</th><th class="unsortable">Age</th><th>Active days</th><th># by commits</th></tr>')
 		for author in data.getAuthors(conf['max_authors']):
 			info = data.getAuthorInfo(author)
-			f.write('<tr><td>%s</td><td>%d (%.2f%%)</td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%d</td></tr>' % (author, info['commits'], info['commits_frac'], info['lines_added'], info['lines_removed'], info['date_first'], info['date_last'], info['timedelta'], len(info['active_days']), info['place_by_commits']))
+			
+			# Primer provere da li 'active_days' postoji u 'info' rečniku
+			if 'active_days' in info:
+				active_days_count = len(info['active_days'])
+			else:
+				active_days_count = 0  # Ili neki drugi podrazumevani broj
+
+
 		f.write('</table>')
 
 		allauthors = data.getAuthors()
@@ -1043,7 +1104,7 @@ class HTMLReportCreator(ReportCreator):
 
 		# Domains
 		f.write(html_header(2, 'Commits by Domains'))
-		domains_by_commits = getkeyssortedbyvaluekey(data.domains, 'commits')
+		domains_by_commits = list(getkeyssortedbyvaluekey(data.domains, 'commits'))
 		domains_by_commits.reverse() # most first
 		f.write('<div class="vtable"><table>')
 		f.write('<tr><th>Domains</th><th>Total (%)</th></tr>')
@@ -1168,10 +1229,10 @@ class HTMLReportCreator(ReportCreator):
 		self.createGraphs(path)
 	
 	def createGraphs(self, path):
-		print 'Generating graphs...'
+		print ('Generating graphs...')
 
 		# hour of day
-		f = open(path + '/hour_of_day.plot', 'w')
+		f = open(path + '/hour_of_day.plot', 'w', encoding='utf-8')
 		f.write(GNUPLOT_COMMON)
 		f.write(
 """
@@ -1308,7 +1369,7 @@ plot 'lines_of_code.dat' using 1:2 w lines
 		f.close()
 
 		# Lines of Code Added per author
-		f = open(path + '/lines_of_code_by_author.plot', 'w')
+		f = open(path + '/lines_of_code_by_author.plot', 'w', encoding='utf-8')
 		f.write(GNUPLOT_COMMON)
 		f.write(
 """
@@ -1337,7 +1398,7 @@ plot """
 		f.close()
 
 		# Commits per author
-		f = open(path + '/commits_by_author.plot', 'w')
+		f = open(path + '/commits_by_author.plot', 'w', encoding='utf-8')
 		f.write(GNUPLOT_COMMON)
 		f.write(
 """
@@ -1370,7 +1431,7 @@ plot """
 		for f in files:
 			out = getpipeoutput([gnuplot_cmd + ' "%s"' % f])
 			if len(out) > 0:
-				print out
+				print (out)
 
 	def printHeader(self, f, title = ''):
 		f.write(
@@ -1384,8 +1445,8 @@ plot """
 	<script type="text/javascript" src="sortable.js"></script>
 </head>
 <body>
-""" % (self.title, conf['style'], getversion()))
-
+""" 
+)
 	def printNav(self, f):
 		f.write("""
 <div class="nav">
@@ -1401,7 +1462,7 @@ plot """
 """)
 		
 def usage():
-	print """
+	print ("""
 Usage: gitstats [options] <gitpath..> <outputpath>
 
 Options:
@@ -1411,7 +1472,7 @@ Default config values:
 %s
 
 Please see the manual page for more details.
-""" % conf
+""" % conf)
 
 
 class GitStats:
@@ -1442,48 +1503,44 @@ class GitStats:
 		except OSError:
 			pass
 		if not os.path.isdir(outputpath):
-			print 'FATAL: Output path is not a directory or does not exist'
+			print ('FATAL: Output path is not a directory or does not exist')
 			sys.exit(1)
 
-		if not getgnuplotversion():
-			print 'gnuplot not found'
-			sys.exit(1)
-
-		print 'Output path: %s' % outputpath
+		print ('Output path: %s' % outputpath)
 		cachefile = os.path.join(outputpath, 'gitstats.cache')
 
 		data = GitDataCollector()
 		data.loadCache(cachefile)
 
 		for gitpath in args[0:-1]:
-			print 'Git path: %s' % gitpath
+			print ('Git path: %s' % gitpath)
 
 			prevdir = os.getcwd()
 			os.chdir(gitpath)
 
-			print 'Collecting data...'
+			print ('Collecting data...')
 			data.collect(gitpath)
 
 			os.chdir(prevdir)
 
-		print 'Refining data...'
+		print ('Refining data...')
 		data.saveCache(cachefile)
 		data.refine()
 
 		os.chdir(rundir)
 
-		print 'Generating report...'
+		print ('Generating report...')
 		report = HTMLReportCreator()
 		report.create(data, outputpath)
 
 		time_end = time.time()
 		exectime_internal = time_end - time_start
-		print 'Execution time %.5f secs, %.5f secs (%.2f %%) in external commands)' % (exectime_internal, exectime_external, (100.0 * exectime_external) / exectime_internal)
+		print ('Execution time %.5f secs, %.5f secs (%.2f %%) in external commands)' % (exectime_internal, exectime_external, (100.0 * exectime_external) / exectime_internal))
 		if sys.stdin.isatty():
-			print 'You may now run:'
-			print
-			print '   sensible-browser \'%s\'' % os.path.join(outputpath, 'index.html').replace("'", "'\\''")
-			print
+			print ('You may now run:')
+			print()
+			print ('   sensible-browser \'%s\'' % os.path.join(outputpath, 'index.html').replace("'", "'\\''"))
+			print()
 
 if __name__=='__main__':
 	g = GitStats()
